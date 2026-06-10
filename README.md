@@ -160,6 +160,32 @@ OSRM router (the raw graph runs fast — no intersection penalties): the
 10-minute yardstick is scaled by 1.37x (Manhattan) / 1.52x (Seattle).
 ```
 
+### Any city via routing APIs (breathing_la)
+
+Uber Movement street speeds only ever existed for a handful of cities. For
+everywhere else: a **sparse anchor grid** queried against a routing API's
+typical-traffic predictions (Mapbox Directions `driving-traffic` with
+`depart_at`; free tier covers a city). Freeway anchors chained every ~3 km
+along motorways carry the fast skeleton — without them, path sums err
++30–90% on long trips; with them ~10% median vs direct routes. Surface
+anchors (farthest-point sampled) plus Delaunay adjacency form the fabric;
+only graph *edges* are queried (≈30k requests for greater LA's 253 anchors
+x 24 h, vs ~1.5M for dense all-pairs), a per-hour endpoint offset (~3–4 min,
+fit against direct long-range checks each hour) corrects the per-leg
+overhead, and Dijkstra supplies the dense matrix the MDS needs. The full
+arterial street network rides along by inverse-distance interpolation of
+anchor displacements; streets are colored by their nearest corridor's speed
+profile. Times are already typical-traffic, so no calibration scalar and no
+amplification: greater LA breathes **-40% (3 AM) to +39% (4 PM)** — a 134%
+linear swing — straight from the data.
+
+```bash
+scripts/anchor_probe.py   # validate the concept on a city slice first
+scripts/anchor_pull.py    # 24h pull (resumable; ~2h at the polite rate)
+scripts/anchor_layout.py  # offset fit + MDS + fabric warp -> day json
+# then render_base.py / compose_video.py as usual, TIME_SCALE 1.0
+```
+
 ### Hour-dependent calibration (breathing_amp / breathing_seattle_amp)
 
 The constant calibration is right off-peak but understates rush hour:

@@ -6,3 +6,5 @@ data/road.csv
 data/seattle/
 data/frames*/
 .DS_Store
+.mapbox_token
+data/day_mds_la.json
