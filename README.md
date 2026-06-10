@@ -1,6 +1,37 @@
 # Elastic Street Network
 
-A real city's street network, warped by how fast you can drive each street, pushed into 3D.
+Cities that breathe: street maps where **distance = drive time**, animated
+over 24 hours. The city swells at rush hour and contracts at night.
+
+![breathing](shots/breathing.gif)
+
+## Reproduce it
+
+The solved layouts for Manhattan, Seattle, and Los Angeles are committed, so
+rebuilding any of the videos is two commands and zero data downloads:
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python osmnx scipy numpy matplotlib pillow pyproj
+# also: ffmpeg on PATH
+
+.venv/bin/python scripts/render_base.py data/day_mds_amp.json _amp   # ~10 min, cached
+.venv/bin/python scripts/compose_video.py _amp Manhattan 1.77        # ~30 s
+open shots/breathing_amp.mp4
+```
+
+Every city/variant is one row of the table in [CLAUDE.md](CLAUDE.md) — which
+also means you can just open [Claude Code](https://claude.com/claude-code) in
+this directory and ask: *"rebuild the Seattle animation"* or *"re-solve
+Manhattan from the raw Uber data"* or *"do this for Chicago"*. CLAUDE.md
+teaches the session the whole pipeline, including re-solving from scratch
+(`scripts/fetch_data.sh` pulls the 2019 Uber Movement speed matrices) and
+extending to arbitrary cities via the Mapbox typical-traffic sampler.
+
+---
+
+The project grew out of a 3D experiment, kept below for the story:
+a street network warped by how fast you can drive each street, pushed into 3D.
 Fast roads contract toward nothing and pin themselves to the ground as valleys; slow streets
 keep their length, and where the plane can't hold it the surface rises — neighborhoods bulge
 into hills shaped by how far they are from fast movement.

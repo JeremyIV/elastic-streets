@@ -58,8 +58,24 @@ meta = json.load(open(FRAMES / "meta.json"))
 W, H = meta["width"], meta["height"]
 STEPS = meta["steps"]
 
-TIMES = "/System/Library/Fonts/Supplemental/Times New Roman.ttf"
-TIMES_I = "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf"
+def find_font(candidates):
+    for p in candidates:
+        if pathlib.Path(p).exists():
+            return p
+    raise SystemExit(f"no serif font found; install one of: {candidates}")
+
+TIMES = find_font([
+    "/System/Library/Fonts/Supplemental/Times New Roman.ttf",       # macOS
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "C:/Windows/Fonts/times.ttf",
+])
+TIMES_I = find_font([
+    "/System/Library/Fonts/Supplemental/Times New Roman Italic.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Italic.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
+    "C:/Windows/Fonts/timesi.ttf",
+])
 f_title = ImageFont.truetype(TIMES, LAYOUT["title_px"])
 f_time = ImageFont.truetype(TIMES, LAYOUT["time_px"])
 f_yard = ImageFont.truetype(TIMES_I, LAYOUT["yard_label_px"])

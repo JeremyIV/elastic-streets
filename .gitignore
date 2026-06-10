@@ -8,3 +8,6 @@ data/frames*/
 .DS_Store
 .mapbox_token
 data/day_mds_la.json
+cache/
+data/la_slice.graphml
+data/day_mds_la_full.json
