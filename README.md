@@ -144,6 +144,7 @@ scripts/relax2d.py         2D edge-length cartogram -> data/network2d.json
 scripts/mds2d.py           2D travel-time MDS -> data/network_mds.json
 scripts/animate_mds.py     24-hour solve (--planar adds a foldover barrier)
 scripts/calibrate_yard.py  empirical yardstick calibration vs the layouts
+scripts/amplify_breathing.py  hour-dependent calibration (see below)
 scripts/render_base.py     expensive layer: map-only frame cache
 scripts/compose_video.py   fast layer: overlay (LAYOUT dict in px) + encode
 scripts/validate_times.py  sanity-check travel times against public OSRM
@@ -158,3 +159,18 @@ breathing_seattle.mp4. Travel-time levels are calibrated against the public
 OSRM router (the raw graph runs fast — no intersection penalties): the
 10-minute yardstick is scaled by 1.37x (Manhattan) / 1.52x (Seattle).
 ```
+
+### Hour-dependent calibration (breathing_amp / breathing_seattle_amp)
+
+The constant calibration is right off-peak but understates rush hour:
+checked against Google Maps depart-at estimates, the needed factor grows
+from 1.77x (4 AM) to 2.37x (5 PM) in Manhattan and 1.62x to 2.26x in
+Seattle — Google's typical 5 PM trip takes ~2x its 4 AM time, while the
+2019 Uber speeds swell only ~1.5x (graph routing misses intersection
+delay, which itself peaks with traffic). `scripts/amplify_breathing.py`
+scales each hour's layout about its centroid by `cal(h)/cal(4 AM)`, with
+`cal(h)` interpolated between those anchors along the layout's own
+congestion scale. Linear breathing span roughly doubles (43% → ~95%), and
+the yardstick becomes exact at every hour instead of a daily mean. The
+`_amp` videos are composed from `day_mds_amp.json` /
+`day_mds_seattle_amp.json` with the 4 AM anchor as the yardstick scale.
