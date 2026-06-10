@@ -3,7 +3,7 @@
 Joins the tracebase NYC Uber Movement matrix (segment x hour, mph, 0=missing)
 to the graph by OSM way id, builds a weekday hour-of-day speed profile per
 edge (free-flow fallback where unobserved), then solves the landmark MDS of
-mds2d.py once per hour.
+the travel-time MDS once per hour.
 
 Two things make the animation honest and smooth:
 - ONE global scale c (meters per second of travel time), fit across all
@@ -21,12 +21,34 @@ import pathlib
 import time
 from collections import defaultdict
 
+import networkx as nx
 import numpy as np
+import osmnx as ox
 from scipy.optimize import minimize
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 
-from relax2d import load_pruned
+
+def load_pruned(path):
+    """Undirected graph, dead-end ramp stubs pruned, largest component."""
+    G = ox.load_graphml(path)
+    G = nx.MultiGraph(ox.convert.to_undirected(G))
+    ramp_classes = {"motorway", "motorway_link", "trunk", "trunk_link",
+                    "primary_link", "secondary_link"}
+    while True:
+        drop = []
+        for n in G.nodes:
+            if G.degree(n) == 1:
+                _, _, d = next(iter(G.edges(n, data=True)))
+                hw = d.get("highway", "")
+                if isinstance(hw, list):
+                    hw = hw[0]
+                if hw in ramp_classes:
+                    drop.append(n)
+        if not drop:
+            break
+        G.remove_nodes_from(drop)
+    return G.subgraph(max(nx.connected_components(G), key=len)).copy()
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"

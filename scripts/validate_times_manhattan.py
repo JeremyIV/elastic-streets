@@ -10,7 +10,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree
 
-from relax2d import load_pruned
+from animate_mds import load_pruned
 from animate_mds import edge_hour_speeds, impute_speeds
 
 PLACES = {

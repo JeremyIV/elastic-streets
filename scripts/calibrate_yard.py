@@ -11,7 +11,7 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 
-from relax2d import load_pruned
+from animate_mds import load_pruned
 from animate_mds import edge_hour_speeds, impute_speeds, DATA
 
 GRAPH = sys.argv[2] if len(sys.argv) > 2 else str(DATA / "manhattan.graphml")
