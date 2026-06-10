@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Elastic Street Network — Manhattan</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070c; overflow: hidden;
+               font: 13px/1.4 -apple-system, "SF Mono", Menlo, sans-serif; color: #9fb2c8; }
+  #c { display: block; width: 100%; height: 100%; }
+  #hud { position: fixed; left: 16px; top: 14px; user-select: none; pointer-events: none; }
+  #hud h1 { font-size: 15px; font-weight: 600; color: #e8eef6; margin: 0 0 2px; letter-spacing: .02em; }
+  #hud .sub { font-size: 11.5px; color: #6e8096; max-width: 360px; }
+  #panel { position: fixed; left: 16px; bottom: 16px; background: rgba(8,12,19,.8);
+           border: 1px solid #1d2735; border-radius: 10px; padding: 12px 14px;
+           backdrop-filter: blur(6px); }
+  .row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .row label { width: 86px; font-size: 11.5px; color: #8da0b8; }
+  .row input[type=range] { width: 180px; accent-color: #e8814a; }
+  .row .val { width: 42px; text-align: right; font-variant-numeric: tabular-nums; color: #c8d4e2; font-size: 11.5px; }
+  #legend { position: fixed; right: 16px; bottom: 16px; background: rgba(8,12,19,.8);
+            border: 1px solid #1d2735; border-radius: 10px; padding: 10px 14px; }
+  #legend .bar { width: 170px; height: 8px; border-radius: 4px;
+    background: linear-gradient(90deg, #ffe3ae, #ff9d52, #e8523f, #a23a8f, #4252c8, #37a3e8); }
+  #legend .lab { display: flex; justify-content: space-between; font-size: 10.5px; color: #6e8096; margin-top: 4px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>Elastic Street Network — Manhattan</h1>
+  <div class="sub">Street length warped by free-flow speed. Fast roads contract into flat
+  valleys; slow streets keep their length and the surface must rise to hold it.</div>
+</div>
+<div id="panel">
+  <div class="row"><label>warp</label><input id="morph" type="range" min="0" max="1" step="0.002" value="1"><span class="val" id="morphv">1.00</span></div>
+  <div class="row"><label>height ×</label><input id="zex" type="range" min="0" max="6" step="0.1" value="2"><span class="val" id="zexv">2.0</span></div>
+  <div class="row"><label>bloom</label><input id="bloom" type="range" min="0" max="1.5" step="0.05" value="0.4"><span class="val" id="bloomv">0.40</span></div>
+</div>
+<div id="legend">
+  <div class="bar"></div>
+  <div class="lab"><span>slow · rises</span><span>fast · flattens</span></div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070c);
+scene.fog = new THREE.Fog(0x05070c, 16000, 40000);
+
+const camera = new THREE.PerspectiveCamera(45, 2, 10, 120000);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+const dataFile = new URLSearchParams(location.search).get('data') || 'network.json';
+const data = await (await fetch(`../data/${dataFile}`)).json();
+const edges = data.edges;
+const zmax = Math.max(1, data.meta.z_max);
+
+let segCount = 0;
+for (const e of edges) segCount += e.pos.length / 3 - 1;
+
+// per segment endpoint: world position (start,end interleaved) for both states
+const flatArr = new Float32Array(segCount * 6);
+const warpArr = new Float32Array(segCount * 6);
+const colArr  = new Float32Array(segCount * 6);
+const posArr  = new Float32Array(segCount * 6);
+
+const stops = [
+  [12,  [1.00, 0.89, 0.68]],
+  [28,  [1.00, 0.62, 0.32]],
+  [40,  [0.91, 0.32, 0.25]],
+  [52,  [0.64, 0.23, 0.56]],
+  [68,  [0.26, 0.32, 0.78]],
+  [92,  [0.22, 0.64, 0.91]],
+];
+function speedColor(v) {
+  if (v <= stops[0][0]) return stops[0][1];
+  for (let i = 1; i < stops.length; i++) {
+    if (v <= stops[i][0]) {
+      const [v0, c0] = stops[i-1], [v1, c1] = stops[i];
+      const t = (v - v0) / (v1 - v0);
+      return [c0[0]+(c1[0]-c0[0])*t, c0[1]+(c1[1]-c0[1])*t, c0[2]+(c1[2]-c0[2])*t];
+    }
+  }
+  return stops[stops.length-1][1];
+}
+
+let o = 0;
+for (const e of edges) {
+  const n = e.pos.length / 3;
+  const col = speedColor(e.speed);
+  for (let i = 0; i < n - 1; i++) {
+    for (const j of [i, i + 1]) {
+      flatArr[o]   = e.flat[j*2];
+      flatArr[o+1] = 0;
+      flatArr[o+2] = -e.flat[j*2+1];
+      warpArr[o]   = e.pos[j*3];
+      warpArr[o+1] = e.pos[j*3+2];
+      warpArr[o+2] = -e.pos[j*3+1];
+      // luminance lifts with height so the relief reads even from above
+      const hl = 0.75 + 0.7 * Math.pow(e.pos[j*3+2] / zmax, 0.7);
+      colArr[o]   = col[0] * hl;
+      colArr[o+1] = col[1] * hl;
+      colArr[o+2] = col[2] * hl;
+      o += 6 - 3;  // advance 3 per endpoint
+    }
+  }
+}
+
+const geom = new LineSegmentsGeometry();
+geom.setPositions(posArr);
+geom.setColors(colArr);
+const mat = new LineMaterial({
+  vertexColors: true,
+  linewidth: 1.7,            // px
+  worldUnits: false,
+  transparent: true,
+  opacity: 0.92,
+  depthWrite: false,
+});
+const lines = new LineSegments2(geom, mat);
+scene.add(lines);
+
+const ext = data.meta.extent;
+const span = Math.max(ext[1]-ext[0], ext[3]-ext[2]);
+const grid = new THREE.GridHelper(span * 1.7, 34, 0x16222f, 0x0b121c);
+grid.position.y = -10;
+scene.add(grid);
+
+const cx = (ext[0]+ext[1])/2, cy = (ext[2]+ext[3])/2;
+if (zmax <= 1) {            // 2D dataset: top-down
+  controls.target.set(cx, 0, -cy);
+  camera.position.set(cx, span * 1.05, -cy + 1);
+} else {
+  controls.target.set(cx, 250, -cy);
+  camera.position.set(cx - span*0.40, span*0.33, -cy + span*0.52);
+}
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.4, 0.5, 0.78);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+const ui = {
+  morph: document.getElementById('morph'),
+  zex: document.getElementById('zex'),
+  bloom: document.getElementById('bloom'),
+};
+function refresh() {
+  const t = parseFloat(ui.morph.value);
+  const zx = parseFloat(ui.zex.value);
+  document.getElementById('morphv').textContent = t.toFixed(2);
+  document.getElementById('zexv').textContent = zx.toFixed(1);
+  for (let i = 0; i < posArr.length; i += 3) {
+    posArr[i]   = flatArr[i]   + (warpArr[i]   - flatArr[i])   * t;
+    posArr[i+1] = (flatArr[i+1] + (warpArr[i+1] - flatArr[i+1]) * t) * zx;
+    posArr[i+2] = flatArr[i+2] + (warpArr[i+2] - flatArr[i+2]) * t;
+  }
+  geom.setPositions(posArr);
+}
+ui.morph.addEventListener('input', refresh);
+ui.zex.addEventListener('input', refresh);
+ui.bloom.addEventListener('input', () => {
+  bloomPass.strength = parseFloat(ui.bloom.value);
+  document.getElementById('bloomv').textContent = bloomPass.strength.toFixed(2);
+});
+refresh();
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const pr = renderer.getPixelRatio();
+  if (canvas.width !== Math.floor(w * pr) || canvas.height !== Math.floor(h * pr)) {
+    renderer.setSize(w, h, false);
+    composer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    mat.resolution.set(w * pr, h * pr);
+  }
+}
+renderer.setAnimationLoop(() => {
+  resize();
+  controls.update();
+  composer.render();
+});
+window.__scene = { scene, camera, controls, renderer, mat, bloomPass };
+</script>
+</body>
+</html>

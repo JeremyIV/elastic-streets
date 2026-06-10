@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Manhattan travel times</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05070c; overflow: hidden;
+               font: 13px/1.4 -apple-system, "SF Mono", Menlo, sans-serif; color: #9fb2c8; }
+  #c { display: block; width: 100%; height: 100%; }
+  #hud { position: fixed; left: 16px; top: 14px; user-select: none; pointer-events: none; }
+  #hud h1 { font-size: 15px; font-weight: 600; color: #e8eef6; margin: 0 0 2px; letter-spacing: .02em; }
+  #hud .sub { font-size: 11.5px; color: #6e8096; max-width: 380px; }
+  #clock { position: fixed; right: 20px; top: 16px; display: flex; align-items: center;
+           gap: 13px; user-select: none; }
+  #clock .t { font-size: 32px; font-weight: 700; color: #e8eef6;
+              font-variant-numeric: tabular-nums; letter-spacing: .03em;
+              display: flex; align-items: baseline; }
+  #clock .t #hnum { display: inline-block; width: 44px; text-align: right; }
+  #clock .t #ampm { display: inline-block; margin-left: 9px; }
+  #panel { position: fixed; left: 16px; bottom: 16px; right: 16px; background: rgba(8,12,19,.8);
+           border: 1px solid #1d2735; border-radius: 10px; padding: 10px 16px;
+           backdrop-filter: blur(6px); display: flex; align-items: center; gap: 14px; }
+  #play { width: 34px; height: 34px; border-radius: 8px; border: 1px solid #2a3a4f;
+          background: #14202e; color: #e8eef6; font-size: 14px; cursor: pointer; }
+  #time { flex: 1; accent-color: #e8814a; }
+  #panel .lab { font-size: 11px; color: #6e8096; white-space: nowrap; }
+  #legend { position: fixed; right: 16px; bottom: 76px; background: rgba(8,12,19,.8);
+            border: 1px solid #1d2735; border-radius: 10px; padding: 10px 14px; }
+  #legend .bar { width: 170px; height: 8px; border-radius: 4px;
+    background: linear-gradient(90deg, #ff5a3c, #ffb46e, #d8e0ea, #6fa8e8); }
+  #legend .lab { display: flex; justify-content: space-between; font-size: 10.5px; color: #6e8096; margin-top: 4px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <h1>Manhattan travel times</h1>
+</div>
+<div id="clock">
+  <svg id="cface" width="44" height="44" viewBox="0 0 44 44">
+    <circle cx="22" cy="22" r="20.5" fill="rgba(8,12,19,.65)" stroke="#2a3a4f" stroke-width="1.4"/>
+    <g id="cticks"></g>
+    <line id="chand" x1="22" y1="22" x2="22" y2="10.5" stroke="#e8eef6"
+          stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="22" cy="22" r="2" fill="#e8814a"/>
+  </svg>
+  <div class="t"><span id="hnum">7</span><span id="ampm">AM</span></div>
+</div>
+<div id="panel">
+  <button id="play">⏸</button>
+  <input id="time" type="range" min="0" max="24" step="any" value="7">
+  <span class="lab">speed</span>
+  <input id="speed" type="range" min="-1" max="0.7" step="0.01" value="-0.301" style="width:110px">
+  <span class="lab" id="speedlab">1 h / 2.0 s</span>
+</div>
+<div id="legend">
+  <div class="bar"></div>
+  <div class="lab"><span>rush crawl</span><span>night pace</span></div>
+</div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070c);
+
+const camera = new THREE.PerspectiveCamera(45, 2, 10, 120000);
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+const data = await (await fetch('../data/day_mds.json')).json();
+const N = data.meta.n_nodes;
+const nodeHours = data.node_hours.map(a => Float32Array.from(a));
+const edges = data.edges;
+const nodesFlat = Float32Array.from(data.nodes_flat);
+
+// segment buffers: per edge polyline of k pts -> k-1 segments
+let segCount = 0;
+for (const e of edges) segCount += e.pts.length / 2 - 1;
+const posArr = new Float32Array(segCount * 6);
+const colArr = new Float32Array(segCount * 6);
+
+// per-edge precomputed: complex base geometry relative to endpoints
+// transform per frame: z' = a1 + s (z - z0_first), s = (b1-a1)/(z0_last-z0_first)
+const eu = new Int32Array(edges.length);
+const ev = new Int32Array(edges.length);
+const ptsArr = edges.map(e => Float32Array.from(e.pts));
+edges.forEach((e, i) => { eu[i] = e.u; ev[i] = e.v; });
+
+// per-edge reference = its fastest hour (its night pace); Uber speeds
+// include lights and stops, so posted-limit free-flow is never reached
+const eref = edges.map(e => Math.max(...e.sp));
+
+// congestion ratio (current / night pace) -> color: red crawl, blue calm
+function ratioColor(r, out) {
+  const stops = [
+    [0.30, [1.00, 0.22, 0.13]],
+    [0.52, [1.00, 0.45, 0.20]],
+    [0.74, [1.00, 0.72, 0.45]],
+    [0.92, [0.62, 0.66, 0.72]],
+    [1.00, [0.45, 0.66, 0.90]],
+  ];
+  if (r <= stops[0][0]) { const c = stops[0][1]; out[0]=c[0]; out[1]=c[1]; out[2]=c[2]; return; }
+  for (let i = 1; i < stops.length; i++) {
+    if (r <= stops[i][0]) {
+      const [v0, c0] = stops[i-1], [v1, c1] = stops[i];
+      const t = (r - v0) / (v1 - v0);
+      out[0] = c0[0]+(c1[0]-c0[0])*t;
+      out[1] = c0[1]+(c1[1]-c0[1])*t;
+      out[2] = c0[2]+(c1[2]-c0[2])*t;
+      return;
+    }
+  }
+  const c = stops[stops.length-1][1]; out[0]=c[0]; out[1]=c[1]; out[2]=c[2];
+}
+
+const geom = new LineSegmentsGeometry();
+geom.setPositions(posArr);
+geom.setColors(colArr);
+// write into the instanced interleaved buffers per frame instead of
+// reallocating via setPositions/setColors
+const posBuf = geom.attributes.instanceStart.data;
+const colBuf = geom.attributes.instanceColorStart.data;
+const mat = new LineMaterial({
+  vertexColors: true, linewidth: 1.6, worldUnits: false,
+  transparent: true, opacity: 0.92, depthWrite: false,
+});
+const linesObj = new LineSegments2(geom, mat);
+linesObj.frustumCulled = false;   // geometry moves every frame
+scene.add(linesObj);
+
+const ext = data.meta.extent;
+const span = Math.max(ext[1]-ext[0], ext[3]-ext[2]);
+const grid = new THREE.GridHelper(span * 1.8, 36, 0x16222f, 0x0b121c);
+grid.position.y = -10;
+scene.add(grid);
+
+// yardstick: 20 minutes of travel, measured against the actual layouts
+// (median layout distance of true 20-min pairs, daily mean — the per-hour
+// values wobble ~±3% with solver misfit, and a ruler shouldn't wiggle);
+// anchored in world space south of the island so it zooms/pans with the map
+const yard10 = data.meta.yard10 || new Array(24).fill(data.meta.scale_mps * 600);
+const yardLen = yard10.reduce((s, v) => s + v, 0) / yard10.length;
+const yardY = ext[2] - 2200;               // south of the flat-map extent
+const yardCx = (ext[0]+ext[1])/2;
+const tick = 320;
+const yardArr = new Float32Array(18);      // bar + two end ticks
+const yardGeom = new THREE.BufferGeometry();
+const yardAttr = new THREE.BufferAttribute(yardArr, 3);
+yardGeom.setAttribute('position', yardAttr);
+const yardLines = new THREE.LineSegments(yardGeom,
+  new THREE.LineBasicMaterial({ color: 0x7d90a8, transparent: true, opacity: 0.9 }));
+yardLines.frustumCulled = false;
+scene.add(yardLines);
+function setYard(L) {
+  const xa = yardCx - L/2, xb = yardCx + L/2;
+  yardArr.set([
+    xa, 0, -yardY,  xb, 0, -yardY,
+    xa, 0, -(yardY - tick),  xa, 0, -(yardY + tick),
+    xb, 0, -(yardY - tick),  xb, 0, -(yardY + tick),
+  ]);
+  yardAttr.needsUpdate = true;
+}
+
+const yardLabel = document.createElement('div');
+yardLabel.textContent = '≈ 10 min drive';
+yardLabel.style.cssText = 'position:fixed;color:#8da0b8;font:11px monospace;' +
+  'pointer-events:none;transform:translate(-50%,0);text-shadow:0 1px 3px #000;';
+document.body.appendChild(yardLabel);
+const yardMid = new THREE.Vector3(yardCx, 0, -(yardY - tick*2.2));
+setYard(yardLen);
+function updateYardstick() {
+  const v = yardMid.clone().project(camera);
+  const onScreen = v.z < 1 && Math.abs(v.x) < 1.2 && Math.abs(v.y) < 1.2;
+  yardLabel.style.display = onScreen ? 'block' : 'none';
+  if (onScreen) {
+    yardLabel.style.left = ((v.x + 1) / 2 * canvas.clientWidth) + 'px';
+    yardLabel.style.top = ((1 - (v.y + 1) / 2) * canvas.clientHeight) + 'px';
+  }
+}
+const cx = (ext[0]+ext[1])/2, cy = (ext[2]+ext[3])/2;
+controls.target.set(cx, 0, -(cy - 2300));
+camera.position.set(cx, span * 1.52, -(cy - 2300) + 1);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(new UnrealBloomPass(new THREE.Vector2(1, 1), 0.35, 0.5, 0.8));
+composer.addPass(new OutputPass());
+
+const col = [0, 0, 0];
+const Pcur = new Float32Array(N * 2);
+function setTime(tau) {
+  // cyclic Catmull-Rom through the hourly keyframes: smooth velocity
+  // across hour marks instead of piecewise-linear kinks
+  const h1 = Math.floor(tau) % 24;
+  const h0 = (h1 + 23) % 24;
+  const h2 = (h1 + 1) % 24;
+  const h3 = (h1 + 2) % 24;
+  const t = tau - Math.floor(tau);
+  const t2 = t * t, t3 = t2 * t;
+  const w0 = 0.5 * (-t + 2*t2 - t3);
+  const w1 = 0.5 * (2 - 5*t2 + 3*t3);
+  const w2 = 0.5 * (t + 4*t2 - 3*t3);
+  const w3 = 0.5 * (-t2 + t3);
+  const A = nodeHours[h0], B = nodeHours[h1], C = nodeHours[h2], D = nodeHours[h3];
+  for (let i = 0; i < N * 2; i++) {
+    Pcur[i] = w0*A[i] + w1*B[i] + w2*C[i] + w3*D[i];
+  }
+
+  let o = 0;
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i];
+    const u = eu[i], v = ev[i];
+    const ax = Pcur[u*2], ay = Pcur[u*2+1];
+    const bx = Pcur[v*2], by = Pcur[v*2+1];
+    const pts = ptsArr[i];
+    const k = pts.length / 2;
+    const ox = pts[0], oy = pts[1];
+    const lx = pts[(k-1)*2], ly = pts[(k-1)*2+1];
+    let dx = lx - ox, dy = ly - oy;
+    const dd = dx*dx + dy*dy;
+    let sx, sy;
+    if (dd > 1e-9) {            // s = (b-a)/(last-first), complex division
+      const nx = bx - ax, ny = by - ay;
+      sx = (nx*dx + ny*dy) / dd;
+      sy = (ny*dx - nx*dy) / dd;
+    } else { sx = 1; sy = 0; }
+
+    const spd = Math.max(1,
+      w0*e.sp[h0] + w1*e.sp[h1] + w2*e.sp[h2] + w3*e.sp[h3]);
+    ratioColor(spd / eref[i], col);
+    // observed/imputed dimming splined like everything else: smooth fade
+    // instead of popping at hour boundaries
+    const vis = Math.min(1, Math.max(0,
+      w0*e.obs[h0] + w1*e.obs[h1] + w2*e.obs[h2] + w3*e.obs[h3]));
+    const dim = 0.45 + 0.55 * vis;
+    const cr = col[0]*dim, cg = col[1]*dim, cb = col[2]*dim;
+
+    let px = ax, py = ay;       // first point maps exactly to endpoint a
+    for (let j = 1; j < k; j++) {
+      const zx = pts[j*2] - ox, zy = pts[j*2+1] - oy;
+      const qx = ax + sx*zx - sy*zy;
+      const qy = ay + sy*zx + sx*zy;
+      posArr[o]   = px; posArr[o+1] = 0; posArr[o+2] = -py;
+      posArr[o+3] = qx; posArr[o+4] = 0; posArr[o+5] = -qy;
+      colArr[o]   = cr; colArr[o+1] = cg; colArr[o+2] = cb;
+      colArr[o+3] = cr; colArr[o+4] = cg; colArr[o+5] = cb;
+      o += 6;
+      px = qx; py = qy;
+    }
+  }
+  posBuf.array.set(posArr);
+  posBuf.needsUpdate = true;
+  colBuf.array.set(colArr);
+  colBuf.needsUpdate = true;
+
+  const h12 = h1 % 12 === 0 ? 12 : h1 % 12;
+  document.getElementById('hnum').textContent = h12;
+  document.getElementById('ampm').textContent = h1 < 12 ? 'AM' : 'PM';
+  chand.setAttribute('transform', `rotate(${(tau % 12) * 30} 22 22)`);
+}
+
+// clock face tick marks: 12 around the dial, cardinals slightly stronger
+const chand = document.getElementById('chand');
+{
+  const g = document.getElementById('cticks');
+  let html = '';
+  for (let i = 0; i < 12; i++) {
+    const a = i * Math.PI / 6;
+    const cardinal = i % 3 === 0;
+    const r1 = cardinal ? 16.2 : 17.8, r2 = 19.2;
+    const sx = 22 + r1 * Math.sin(a), sy = 22 - r1 * Math.cos(a);
+    const ex = 22 + r2 * Math.sin(a), ey = 22 - r2 * Math.cos(a);
+    html += `<line x1="${sx.toFixed(2)}" y1="${sy.toFixed(2)}" ` +
+            `x2="${ex.toFixed(2)}" y2="${ey.toFixed(2)}" ` +
+            `stroke="${cardinal ? '#7d90a8' : '#3a4a60'}" ` +
+            `stroke-width="${cardinal ? 1.5 : 1}" stroke-linecap="round"/>`;
+  }
+  g.innerHTML = html;
+}
+
+const timeEl = document.getElementById('time');
+const playEl = document.getElementById('play');
+let playing = true;
+let tau = parseFloat(timeEl.value);   // time lives here; the slider only displays it
+let hoursPerSec = 0.5;                // 2 s per hour -> 48 s per day
+const speedEl = document.getElementById('speed');
+const speedLab = document.getElementById('speedlab');
+speedEl.addEventListener('input', () => {
+  hoursPerSec = Math.pow(10, parseFloat(speedEl.value));
+  speedLab.textContent = hoursPerSec < 1
+    ? `1 h / ${(1 / hoursPerSec).toFixed(1)} s`
+    : `${hoursPerSec.toFixed(1)} h / s`;
+});
+playEl.addEventListener('click', () => {
+  playing = !playing;
+  playEl.textContent = playing ? '⏸' : '▶';
+});
+timeEl.addEventListener('input', () => {
+  tau = parseFloat(timeEl.value);
+  playing = false;
+  playEl.textContent = '▶';
+});
+
+let last = performance.now();
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  const pr = renderer.getPixelRatio();
+  if (canvas.width !== Math.floor(w * pr) || canvas.height !== Math.floor(h * pr)) {
+    renderer.setSize(w, h, false);
+    composer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    mat.resolution.set(w * pr, h * pr);
+  }
+}
+renderer.setAnimationLoop((now) => {
+  resize();
+  const dt = Math.min((now - last) / 1000, 0.25); last = now;
+  if (playing) {
+    tau += dt * hoursPerSec;
+    if (tau >= 24) tau -= 24;
+    timeEl.value = tau;
+  }
+  setTime(tau);
+  updateYardstick();
+  controls.update();
+  composer.render();
+});
+window.__scene = { scene, camera, controls, renderer, composer, setTime, timeEl };
+</script>
+</body>
+</html>
