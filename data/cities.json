@@ -1,0 +1,18 @@
+[
+  {"name": "nyc",       "tz": "America/New_York",    "bbox": [-74.05, 40.54, -73.70, 40.92]},
+  {"name": "la",        "tz": "America/Los_Angeles", "bbox": [-118.66, 33.70, -118.10, 34.32]},
+  {"name": "chicago",   "tz": "America/Chicago",     "bbox": [-87.85, 41.70, -87.55, 42.05]},
+  {"name": "sf",        "tz": "America/Los_Angeles", "bbox": [-122.52, 37.70, -122.15, 37.90]},
+  {"name": "boston",    "tz": "America/New_York",    "bbox": [-71.20, 42.27, -70.95, 42.42]},
+  {"name": "dc",        "tz": "America/New_York",    "bbox": [-77.20, 38.80, -76.90, 39.00]},
+  {"name": "seattle",   "tz": "America/Los_Angeles", "bbox": [-122.44, 47.48, -122.24, 47.74]},
+  {"name": "houston",   "tz": "America/Chicago",     "bbox": [-95.60, 29.60, -95.20, 29.90]},
+  {"name": "dallas",    "tz": "America/Chicago",     "bbox": [-97.00, 32.65, -96.65, 32.95]},
+  {"name": "atlanta",   "tz": "America/New_York",    "bbox": [-84.55, 33.60, -84.25, 33.90]},
+  {"name": "austin",    "tz": "America/Chicago",     "bbox": [-97.90, 30.15, -97.60, 30.45]},
+  {"name": "toronto",   "tz": "America/Toronto",     "bbox": [-79.55, 43.58, -79.25, 43.80]},
+  {"name": "vancouver", "tz": "America/Vancouver",   "bbox": [-123.25, 49.12, -122.90, 49.32]},
+  {"name": "saopaulo",  "tz": "America/Sao_Paulo",   "bbox": [-46.83, -23.70, -46.40, -23.40]},
+  {"name": "bogota",    "tz": "America/Bogota",      "bbox": [-74.20, 4.50, -73.99, 4.83]},
+  {"name": "portland",  "tz": "America/Los_Angeles", "bbox": [-122.85, 45.42, -122.47, 45.62]}
+]
