@@ -6,6 +6,7 @@ Only needs re-running when the underlying layouts change.
 """
 
 import json
+import os
 import pathlib
 import sys
 
@@ -64,6 +65,12 @@ y1 += slack / 2
 # optional zoom (argv[3]): shrink the window around its center; content
 # beyond the edges (outlier fringe roads at peak hours) just exits the frame
 ZOOM = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
+# color mode: "ratio" = speed vs each edge's daily max (original); "abs" =
+# absolute speed (slow roads warm, fast roads cool) — recovers the dense-core
+# glow when the data is categorical. ABS_LO/HI are the kph -> red/blue anchors.
+COLOR_MODE = os.environ.get("COLOR_MODE", "ratio")
+ABS_LO = float(os.environ.get("ABS_LO", 8))
+ABS_HI = float(os.environ.get("ABS_HI", 70))
 if ZOOM != 1.0:
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     hx, hy = (x1 - x0) / 2 / ZOOM, (y1 - y0) / 2 / ZOOM
@@ -88,7 +95,10 @@ for s in range(STEPS):
     a = P[eu][:, 0] + 1j * P[eu][:, 1]
     b = P[ev][:, 0] + 1j * P[ev][:, 1]
     spd = np.maximum(w0*sp[:, h0] + w1*sp[:, h1] + w2*sp[:, h2] + w3*sp[:, h3], 1.0)
-    ratio = spd / eref
+    if COLOR_MODE == "abs":
+        ratio = 0.30 + 0.70 * np.clip((spd - ABS_LO) / (ABS_HI - ABS_LO), 0, 1)
+    else:
+        ratio = spd / eref
     vis = np.clip(w0*obs[:, h0] + w1*obs[:, h1] + w2*obs[:, h2] + w3*obs[:, h3],
                   0.0, 1.0)
     segs, cols = [], []
