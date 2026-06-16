@@ -45,6 +45,7 @@ def ratio_color(r):
 eu = np.array([e["u"] for e in edges])
 ev = np.array([e["v"] for e in edges])
 zpts = [np.array(e["pts"]).reshape(-1, 2) @ np.array([1, 1j]) for e in edges]
+glen = np.array([abs(z[-1] - z[0]) for z in zpts])   # geographic end-to-end length
 sp = np.array([e["sp"] for e in edges])
 obs = np.array([e["obs"] for e in edges])
 eref = sp.max(axis=1)
@@ -71,6 +72,10 @@ ZOOM = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
 COLOR_MODE = os.environ.get("COLOR_MODE", "ratio")
 ABS_LO = float(os.environ.get("ABS_LO", 8))
 ABS_HI = float(os.environ.get("ABS_HI", 70))
+# diagnostic: if >0, color edges stretched more than this many times their
+# geographic length bright red and dim everything else (isolates "spike"
+# artifacts from under-constrained MDS degrees of freedom).
+HIGHLIGHT = float(os.environ.get("HIGHLIGHT_STRETCH", 0))
 if ZOOM != 1.0:
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     hx, hy = (x1 - x0) / 2 / ZOOM, (y1 - y0) / 2 / ZOOM
@@ -110,8 +115,14 @@ for s in range(STEPS):
         else:
             z1 = z0 + (a[i] - z0[0])
         segs.append(np.column_stack([z1.real, z1.imag]))
-        c = ratio_color(ratio[i])
-        cols.append((*c, 0.35 + 0.55 * vis[i]))
+        if HIGHLIGHT > 0:
+            if abs(b[i] - a[i]) / max(glen[i], 1.0) > HIGHLIGHT:
+                cols.append((1.0, 0.0, 0.0, 0.95))      # spike: bright red
+            else:
+                cols.append((0.32, 0.38, 0.46, 0.22))   # core: dimmed
+        else:
+            c = ratio_color(ratio[i])
+            cols.append((*c, 0.35 + 0.55 * vis[i]))
 
     fig = plt.figure(figsize=(7.2, 12.0), dpi=150)
     fig.patch.set_facecolor("#05070c")

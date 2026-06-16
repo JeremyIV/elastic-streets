@@ -123,6 +123,47 @@ COLOR_MODE=abs .venv/bin/python scripts/render_base.py data/day_mds_seattle_dir.
 Run it on `data/manhattan.graphml` for a directions-based Manhattan directly
 comparable to the original Uber map — same network, different speed source.
 
+### Map Matching for residential coverage
+
+Directions always returns the *fastest* path, so it rides arterials and skips
+residential streets (Manhattan: 39% edge coverage). `collect_matching.py` fills
+them via the Mapbox **Map Matching** API: it walks the street graph into long
+traces (≤100 coords) and reads back per-segment typical-traffic speeds for
+*those* exact streets. `solve_directions.py` auto-merges `<city>_match_links.json`
+with `<city>_dir_links.json`, lifting Manhattan to 83% real coverage (> the old
+Uber 67%). It also calibrates uncovered-edge free-flow from the observed per-class
+median (posted limits overestimate residential free-flow ~70%).
+
+```bash
+# after collect_directions: add residential coverage, then solve + render as usual
+.venv/bin/python scripts/collect_matching.py manhattan data/manhattan.graphml
+.venv/bin/python scripts/solve_directions.py manhattan data/manhattan.graphml
+.venv/bin/python scripts/render_base.py data/day_mds_manhattan_dir.json _manhattan_dir
+.venv/bin/python scripts/compose_video.py _manhattan_dir Manhattan 1.0
+```
+
+### Solver knobs / research (`solve_directions.py`, `solve_sampled.py`)
+
+The layout is a spring model: springs from landmarks to nodes, rest length =
+travel-time distance (edges are NOT in the objective). Knobs on solve_directions:
+- `--wq Q` — stress weighting: 0 = 1/D² (local; fewest spikes, more folds),
+  1 = 1/D (Sammon, the sweet spot), 2 = unweighted (global; spiky).
+- `--landmarks N` — more landmarks lower spike *severity*, not the regime.
+- `--planar [--tau T --wtri W]` — triangle foldover barrier → planar, but it
+  freezes the breathing (the breathing *is* the fold-prone curl). planar XOR breathing.
+- `--wedge W` — add a strong spring on every street edge (local smoothing).
+- `--seed S` — landmark RNG (spikes are seed-dependent → emergent, not intrinsic).
+
+`solve_sampled.py` = importance-sampled (Horvitz–Thompson) all-pairs MDS — keep
+pairs w.p. ∝1/dist, weight 1/p; `--graphlocal` uses the street graph for the
+local band + sampled long pairs for gross structure, `--ew` over-weights street
+springs. Diagnostic: `HIGHLIGHT_STRETCH=8 .venv/bin/python scripts/render_base.py …`
+colors edges stretched >8× their real length red.
+
+Takeaways: spikes are a *weighting* effect (a mild 1/D taper minimizes them);
+folds are inherent to flattening a non-Euclidean metric into 2D; the canonical
+`1/D²` landmark stays the flagship for its symmetric rush-hour swell.
+
 ## Gotchas
 
 - render_base.py is the expensive layer; compose_video.py is the cheap one.

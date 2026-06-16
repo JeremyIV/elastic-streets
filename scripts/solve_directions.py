@@ -69,6 +69,21 @@ def main():
     ap.add_argument("--landmarks", type=int, default=250)
     ap.add_argument("--anchor", type=float, default=0.05)
     ap.add_argument("--maxiter", type=int, default=1200)
+    ap.add_argument("--wq", type=float, default=0.0,
+                    help="tilt stress toward global distances: 0 = 1/D^2 weight "
+                         "(local, default), 1 = 1/D (Sammon), 2 = unweighted")
+    ap.add_argument("--planar", action="store_true",
+                    help="add a triangle-orientation foldover barrier (planarity)")
+    ap.add_argument("--wtri", type=float, default=30.0)
+    ap.add_argument("--tau", type=float, default=0.1,
+                    help="barrier area floor (lower = more compression/breathing "
+                         "allowed before the fold barrier bites)")
+    ap.add_argument("--out", default=None,
+                    help="output path (default data/day_mds_<city>_dir.json)")
+    ap.add_argument("--seed", type=int, default=7, help="landmark RNG seed")
+    ap.add_argument("--wedge", type=float, default=0.0,
+                    help="add a spring on every street edge (rest length = its "
+                         "travel-time distance); value = strength vs landmark springs")
     args = ap.parse_args()
 
     G = ox.load_graphml(args.graph)
@@ -110,8 +125,15 @@ def main():
     # accumulate dist/dur from harvested links onto edges, per hour
     to_xy = pyproj.Transformer.from_crs("EPSG:4326", crs, always_xy=True)
     links = json.load(open(DATA / f"{args.city}_dir_links.json"))["links"]
+    items = list(links.items())
+    mpath = DATA / f"{args.city}_match_links.json"
+    if mpath.exists():
+        mlinks = json.load(open(mpath))["links"]
+        items += [(f"m{k}", v) for k, v in mlinks.items()]
+        print(f"+ merged {len(mlinks)} Map-Matching cells from {mpath.name}",
+              flush=True)
     dacc = np.zeros((E, 24)); tacc = np.zeros((E, 24))
-    for key, pts in links.items():
+    for key, pts in items:
         if not pts:
             continue
         h = int(key.split("_")[1])
@@ -129,10 +151,27 @@ def main():
     print(f"coverage: {cov.sum()}/{E} edges ({100*cov.mean():.0f}%) covered "
           f"at >=1 hour; {100*obs.mean():.0f}% of edge-hours", flush=True)
 
-    # free-flow per edge: observed fastest hour, else osmnx speed_kph
-    ff = np.nanmax(np.where(obs, sp, np.nan), axis=1)
+    # free-flow per edge: observed fastest hour. For uncovered edges, use the
+    # OBSERVED median free-flow of the same highway class (signal-calibrated) --
+    # posted speed limits badly overestimate real residential free-flow, which
+    # made imputed side-street speeds too fast. Fall back to osmnx speed_kph
+    # only for classes we never observed (>=8 covered edges needed to calibrate).
+    cls = np.array([cls_of(d) for *_, d in edges])
+    ff_obs = np.where(obs, sp, -np.inf).max(axis=1)
+    ff_obs = np.where(np.isfinite(ff_obs), ff_obs, np.nan)
+    covered = np.isfinite(ff_obs)
     spkph = np.array([float(d.get("speed_kph", 40.0)) for *_, d in edges])
-    ff = np.where(np.isfinite(ff), ff, spkph)
+    cls_ff = {c: float(np.median(ff_obs[covered & (cls == c)]))
+              for c in np.unique(cls) if (covered & (cls == c)).sum() >= 8}
+    ff = ff_obs.copy()
+    mi = np.where(~covered)[0]
+    ff[mi] = [cls_ff.get(cls[i], spkph[i]) for i in mi]
+    n_cal = sum(cls[i] in cls_ff for i in mi)
+    print(f"free-flow: {covered.sum()} observed, {n_cal} class-calibrated, "
+          f"{len(mi) - n_cal} speed-limit fallback", flush=True)
+    for c in sorted(cls_ff, key=lambda k: -cls_ff[k]):
+        print(f"    {c:14s} ff {cls_ff[c]:5.1f} kph  (speed-limit median "
+              f"{np.median(spkph[cls == c]):4.1f})", flush=True)
     sp = impute(sp, ff, np.array([g.mean(0) for g in geom]))
 
     ea = np.array([idx[u] for u, v, k, d in edges])
@@ -140,7 +179,7 @@ def main():
     length = np.array([float(d["length"]) for *_, d in edges])
     print("network mean kph by hour:", np.round(sp.mean(0), 1).tolist(), flush=True)
 
-    rng = np.random.default_rng(7)
+    rng = np.random.default_rng(args.seed)
     lm = rng.choice(N, size=min(args.landmarks, N), replace=False)
     T_hours = []
     for h in range(24):
@@ -163,11 +202,38 @@ def main():
     span2 = ((P0.max(0) - P0.min(0)) ** 2).sum()
     P0_ss = (P0 * P0).sum()
 
-    def solve_hour(T, X0):
+    # optional foldover barrier: triangulate the geographic fabric, then penalize
+    # any triangle that collapses below TAU of its area or flips orientation, so
+    # the deformation stays locally injective (planar -- no streets folding over).
+    tri = a0 = None
+    TAU = args.tau
+    if args.planar:
+        from scipy.spatial import Delaunay
+        tri = Delaunay(P0).simplices
+        u = P0[tri[:, 1]] - P0[tri[:, 0]]
+        v = P0[tri[:, 2]] - P0[tri[:, 0]]
+        a0 = 0.5 * (u[:, 0] * v[:, 1] - u[:, 1] * v[:, 0])
+        neg = a0 < 0
+        tri[neg] = tri[neg][:, [0, 2, 1]]
+        a0 = np.abs(a0)
+        Ld = lambda i, j: np.sqrt(((P0[tri[:, i]] - P0[tri[:, j]]) ** 2).sum(1))
+        keep = (Ld(0, 1) < 600) & (Ld(1, 2) < 600) & (Ld(0, 2) < 600)
+        tri, a0 = tri[keep], a0[keep]
+        print(f"planar: {len(tri)} fabric triangles, barrier at {TAU} area",
+              flush=True)
+
+    def solve_hour(T, X0, h):
         Tij = T.ravel()
         keep = np.isfinite(Tij) & (Tij > 30) & (A0 != B0)
         A, B, D = A0[keep], B0[keep], c * Tij[keep]
         wa = args.anchor * len(A) / N / span2
+        wq = D ** args.wq
+        wq = wq / wq.mean()        # mean-1 so the anchor balance is wq-independent
+        # barrier on from the start: preventing folds (deforming the planar P0
+        # while staying injective) is far easier than untangling them afterward.
+        use_tri = [tri is not None]
+        De = c * length / (sp[:, h] / 3.6)          # street-spring rest lengths (m)
+        wedge_eff = args.wedge * len(A) / E          # strength vs landmark springs
 
         def f(x):
             P = x.reshape(N, 2)
@@ -175,15 +241,41 @@ def main():
             dp = P[A] - P[B]
             L = np.sqrt((dp * dp).sum(1) + 1e-9)
             r = (L - D) / D
-            g = (2.0 * r / (D * L))[:, None] * dp
+            g = (wq * 2.0 * r / (D * L))[:, None] * dp
             for col in (0, 1):
                 grad[:, col] += np.bincount(A, g[:, col], minlength=N)
                 grad[:, col] -= np.bincount(B, g[:, col], minlength=N)
+            E_edge = 0.0
+            if args.wedge > 0:                       # local street springs
+                dpe = P[ea] - P[eb]
+                Le = np.sqrt((dpe * dpe).sum(1) + 1e-9)
+                re = (Le - De) / De
+                ge = (wedge_eff * 2.0 * re / (De * Le))[:, None] * dpe
+                for col in (0, 1):
+                    grad[:, col] += np.bincount(ea, ge[:, col], minlength=N)
+                    grad[:, col] -= np.bincount(eb, ge[:, col], minlength=N)
+                E_edge = wedge_eff * float((re * re).sum())
             tmean = P.mean(0); Pc = P - tmean
             s = (Pc * P0).sum() / P0_ss
             dxy = Pc - s * P0
-            E_ = (r * r).sum() + wa * (dxy * dxy).sum()
+            E_ = (wq * r * r).sum() + E_edge + wa * (dxy * dxy).sum()
             grad += 2.0 * wa * dxy
+            if tri is not None and use_tri[0]:
+                tu = P[tri[:, 1]] - P[tri[:, 0]]
+                tv = P[tri[:, 2]] - P[tri[:, 0]]
+                a = 0.5 * (tu[:, 0] * tv[:, 1] - tu[:, 1] * tv[:, 0])
+                sviol = (TAU * a0 - a) / a0
+                act = sviol > 0
+                if act.any():
+                    E_ += args.wtri * (sviol[act] ** 2).sum()
+                    coef = -2.0 * args.wtri * sviol[act] / a0[act]
+                    g1 = 0.5 * np.column_stack(
+                        [tv[act][:, 1], -tv[act][:, 0]]) * coef[:, None]
+                    g2 = 0.5 * np.column_stack(
+                        [-tu[act][:, 1], tu[act][:, 0]]) * coef[:, None]
+                    np.add.at(grad, tri[act, 1], g1)
+                    np.add.at(grad, tri[act, 2], g2)
+                    np.add.at(grad, tri[act, 0], -(g1 + g2))
             return E_, grad.ravel()
 
         res = minimize(f, X0.ravel().copy(), jac=True, method="L-BFGS-B",
@@ -196,10 +288,16 @@ def main():
     for p in range(2):
         out = []
         for h in range(24):
-            X, stress = solve_hour(T_hours[h], X)
+            X, stress = solve_hour(T_hours[h], X, h)
             out.append(X.copy())
             mr = np.sqrt((X ** 2).sum(1)).mean()
-            print(f"  p{p} h={h:02d} stress {stress:.3f} breath {mr/r0-1:+.1%} "
+            fl = ""
+            if tri is not None:
+                tu = X[tri[:, 1]] - X[tri[:, 0]]
+                tv = X[tri[:, 2]] - X[tri[:, 0]]
+                a = 0.5 * (tu[:, 0] * tv[:, 1] - tu[:, 1] * tv[:, 0])
+                fl = f" flips {int((a <= 0).sum())}"
+            print(f"  p{p} h={h:02d} stress {stress:.3f} breath {mr/r0-1:+.1%}{fl} "
                   f"({time.time()-t0:.0f}s)", flush=True)
         hours = out
 
@@ -215,7 +313,7 @@ def main():
            "nodes_flat": np.round(P0, 1).ravel().tolist(),
            "node_hours": [np.round(X, 1).ravel().tolist() for X in hours],
            "edges": edges_out}
-    outpath = DATA / f"day_mds_{args.city}_dir.json"
+    outpath = pathlib.Path(args.out) if args.out else DATA / f"day_mds_{args.city}_dir.json"
     json.dump(out, open(outpath, "w"))
     print(f"wrote {outpath} ({outpath.stat().st_size/1e6:.1f} MB)")
 

@@ -11,5 +11,6 @@ data/day_mds_la.json
 cache/
 data/la_slice.graphml
 data/day_mds_la_full.json
-# raw Directions-API per-segment harvests (large; re-fetch via collect_directions.py)
+# raw per-segment speed harvests (large; re-fetch via collect_directions.py / collect_matching.py)
 data/*_dir_links.json
+data/*_match_links.json
