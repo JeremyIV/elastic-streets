@@ -157,7 +157,13 @@ travel-time distance (edges are NOT in the objective). Knobs on solve_directions
 `solve_sampled.py` = importance-sampled (Horvitz–Thompson) all-pairs MDS — keep
 pairs w.p. ∝1/dist, weight 1/p; `--graphlocal` uses the street graph for the
 local band + sampled long pairs for gross structure, `--ew` over-weights street
-springs. Diagnostic: `HIGHLIGHT_STRETCH=8 .venv/bin/python scripts/render_base.py …`
+springs, `--hops H` makes the local stratum an H-hop mesh (denser = cleaner fine
+structure). NB: the local springs need the `tt>1s` floor in solve_hour -- a
+`>30s` floor (harmless for landmark pairs) silently drops ~2/3 of short street
+springs. The committed clean Manhattan (`data/day_mds_manhattan_sampled.json`,
+near-spike-free, same gross shape as the canonical) is:
+`scripts/solve_sampled.py data/day_mds_manhattan_dir.json data/day_mds_manhattan_sampled.json --graphlocal --wq 1 --ew 100 --hops 2`
+then render `_manhattan_sampled` + compose. Diagnostic: `HIGHLIGHT_STRETCH=8 .venv/bin/python scripts/render_base.py …`
 colors edges stretched >8× their real length red.
 
 Takeaways: spikes are a *weighting* effect (a mild 1/D taper minimizes them);

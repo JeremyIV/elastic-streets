@@ -21,7 +21,7 @@ import time
 
 import numpy as np
 from scipy.optimize import minimize
-from scipy.sparse import coo_matrix
+from scipy.sparse import coo_matrix, triu
 from scipy.sparse.csgraph import dijkstra
 
 ap = argparse.ArgumentParser()
@@ -42,6 +42,9 @@ ap.add_argument("--lcut", type=float, default=250.0,
 ap.add_argument("--ew", type=float, default=1.0,
                 help="street-spring strength multiplier (1=consistent; >1 over-weights "
                      "street edges so they win locally -> smoother fine structure)")
+ap.add_argument("--hops", type=int, default=1,
+                help="local stratum = all node pairs within this many street-hops "
+                     "(1=immediate edges, 2=neighbors-of-neighbors, ...)")
 args = ap.parse_args()
 
 d = json.load(open(args.inp))
@@ -65,15 +68,26 @@ rng = np.random.default_rng(args.seed)
 I, J = np.triu_indices(N, k=1)
 geo = np.maximum(np.hypot(P0[I, 0] - P0[J, 0], P0[I, 1] - P0[J, 1]), 1e-9)
 if args.graphlocal:
-    # local band = the real street graph (street-connected, smooth); sample only
-    # longer pairs for gross structure -> drops the geo-close-but-travel-far
-    # swarm that distorts fine structure.
+    # local stratum = node pairs within args.hops street-hops (street-connected,
+    # smooth); sample only longer pairs for gross structure -> drops the
+    # geo-close-but-travel-far swarm that distorts fine structure.
+    if args.hops <= 1:
+        la, lb = ea, eb
+    else:
+        A = coo_matrix((np.ones(2 * len(ea)),
+                        (np.concatenate([ea, eb]), np.concatenate([eb, ea]))),
+                       shape=(N, N)).tocsr()
+        reach = A.copy(); acc = A.copy()
+        for _ in range(args.hops - 1):
+            acc = acc @ A
+            reach = reach + acc
+        R = triu(reach, k=1).tocoo()
+        la, lb = R.row, R.col
+    lg = np.maximum(np.hypot(P0[la, 0] - P0[lb, 0], P0[la, 1] - P0[lb, 1]), 1e-9)
     far = geo >= args.lcut
     I, J, geo = I[far], J[far], geo[far]
-    eg = np.maximum(np.hypot(P0[ea, 0] - P0[eb, 0], P0[ea, 1] - P0[eb, 1]), 1e-9)
-    budget_far = max(args.budget - len(ea), 1)
+    budget_far = max(args.budget - len(la), 1)
 else:
-    eg = None
     budget_far = args.budget
 lo, hi = 0.0, float(geo.max())                          # binary-search k for the budget
 for _ in range(50):
@@ -85,12 +99,12 @@ for _ in range(50):
 k = 0.5 * (lo + hi)
 p = np.minimum(1.0, k / geo)
 keep = rng.random(len(geo)) < p
-if args.graphlocal:                                     # street edges (p=1) + sampled far pairs
-    A0 = np.concatenate([ea, I[keep]])
-    B0 = np.concatenate([eb, J[keep]])
-    WT = np.concatenate([args.ew * eg ** (-args.wq),
+if args.graphlocal:                                     # local stratum (p=1) + sampled far pairs
+    A0 = np.concatenate([la, I[keep]])
+    B0 = np.concatenate([lb, J[keep]])
+    WT = np.concatenate([args.ew * lg ** (-args.wq),
                          (1.0 / p[keep]) * geo[keep] ** (-args.wq)])
-    print(f"springs: {len(ea)} street edges + {int(keep.sum())} sampled "
+    print(f"springs: {len(la)} local (<={args.hops} hops) + {int(keep.sum())} sampled "
           f"(geo>={args.lcut:.0f} m, k={k:.0f} m) = {len(A0)}", flush=True)
 else:
     A0, B0 = I[keep], J[keep]
@@ -116,7 +130,7 @@ print(f"all-pairs dijkstra x24: {time.time()-t0:.0f}s", flush=True)
 L0 = np.hypot(P0[A0, 0] - P0[B0, 0], P0[A0, 1] - P0[B0, 1])
 num = den = 0.0
 for h in range(24):
-    ok = np.isfinite(TT[h]) & (TT[h] > 30)
+    ok = np.isfinite(TT[h]) & (TT[h] > 1)
     num += (WT[ok] * L0[ok] * TT[h][ok]).sum()
     den += (WT[ok] * TT[h][ok] ** 2).sum()
 c = num / den
@@ -124,7 +138,7 @@ print(f"global scale {c:.2f} m/s ({c*3.6:.0f} kph)", flush=True)
 
 
 def solve_hour(Th, X0):
-    ok = np.isfinite(Th) & (Th > 30)
+    ok = np.isfinite(Th) & (Th > 1)
     A, B, D, W = A0[ok], B0[ok], c * Th[ok], WT[ok]
 
     def f(x):
