@@ -30,26 +30,32 @@ ap.add_argument("out")
 ap.add_argument("--budget", type=int, default=1_100_000, help="target spring count")
 ap.add_argument("--maxiter", type=int, default=1200)
 ap.add_argument("--seed", type=int, default=7)
-ap.add_argument("--wq", type=float, default=0.0,
+ap.add_argument("--wq", type=float, default=1.0,
                 help="down-weight long springs by 1/dist^wq in the objective "
-                     "(0 = equal-weight all-pairs, 2 = local like 1/D^2)")
-ap.add_argument("--graphlocal", action="store_true",
+                     "(0 = equal-weight all-pairs, 2 = local like 1/D^2; default 1)")
+ap.add_argument("--graphlocal", action=argparse.BooleanOptionalAction, default=True,
                 help="use the street graph for the local band (all edges) and "
                      "sample only pairs with geo>=lcut -- drops geo-close but "
-                     "not-street-connected springs that distort fine structure")
+                     "not-street-connected springs that distort fine structure "
+                     "(default on; --no-graphlocal for pure all-pairs sampling)")
 ap.add_argument("--lcut", type=float, default=250.0,
                 help="local-band cutoff (m): below it only street edges, above it sampled")
-ap.add_argument("--ew", type=float, default=1.0,
+ap.add_argument("--ew", type=float, default=100.0,
                 help="street-spring strength multiplier (1=consistent; >1 over-weights "
-                     "street edges so they win locally -> smoother fine structure)")
-ap.add_argument("--hops", type=int, default=1,
+                     "street edges so they win locally -> smoother fine; default 100)")
+ap.add_argument("--hops", type=int, default=2,
                 help="local stratum = all node pairs within this many street-hops "
-                     "(1=immediate edges, 2=neighbors-of-neighbors, ...)")
+                     "(1=immediate edges, 2=neighbors-of-neighbors; default 2)")
+ap.add_argument("--anchor", type=float, default=0.0,
+                help="similarity-invariant Procrustes pull toward geographic shape "
+                     "(0=off; higher = more 'looks like normal Manhattan')")
 args = ap.parse_args()
 
 d = json.load(open(args.inp))
 N = d["meta"]["n_nodes"]
 P0 = np.array(d["nodes_flat"]).reshape(N, 2)
+span2 = ((P0.max(0) - P0.min(0)) ** 2).sum()
+P0_ss = (P0 * P0).sum()
 edges = d["edges"]
 ea = np.array([e["u"] for e in edges]); eb = np.array([e["v"] for e in edges])
 sp = np.array([e["sp"] for e in edges])                 # E x 24, kph
@@ -151,7 +157,15 @@ def solve_hour(Th, X0):
         for col in (0, 1):
             grad[:, col] += np.bincount(A, g[:, col], minlength=N)
             grad[:, col] -= np.bincount(B, g[:, col], minlength=N)
-        return float((W * diff * diff).sum()), grad.ravel()
+        E_ = float((W * diff * diff).sum())
+        if args.anchor > 0:                          # Procrustes pull to geographic
+            tmean = P.mean(0); Pc = P - tmean
+            s = (Pc * P0).sum() / P0_ss
+            dxy = Pc - s * P0
+            wa = args.anchor * float((W * D * D).sum()) / (N * span2)
+            E_ += wa * float((dxy * dxy).sum())
+            grad += 2.0 * wa * dxy
+        return E_, grad.ravel()
 
     res = minimize(f, X0.ravel().copy(), jac=True, method="L-BFGS-B",
                    options={"maxiter": args.maxiter, "maxfun": args.maxiter * 2,

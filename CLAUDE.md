@@ -162,8 +162,12 @@ structure). NB: the local springs need the `tt>1s` floor in solve_hour -- a
 `>30s` floor (harmless for landmark pairs) silently drops ~2/3 of short street
 springs. The committed clean Manhattan (`data/day_mds_manhattan_sampled.json`,
 near-spike-free, same gross shape as the canonical) is:
-`scripts/solve_sampled.py data/day_mds_manhattan_dir.json data/day_mds_manhattan_sampled.json --graphlocal --wq 1 --ew 100 --hops 2`
-then render `_manhattan_sampled` + compose at `time_scale 1.2`. (`scripts/validate_warp.py`
+`scripts/solve_sampled.py data/day_mds_manhattan_dir.json data/day_mds_manhattan_sampled.json`
+(graphlocal/wq1/ew100/hops2 are now the **defaults**, so no flags needed; add
+`--anchor 200` for a geographic "normal Manhattan" look). **solve_sampled is the
+default layout solver** — solve_directions is now just data-prep (harvest +
+speed calibration) + the legacy landmark solve it reads speeds from.
+Then render `_manhattan_sampled` + compose at `time_scale 1.2`. (`scripts/validate_warp.py`
 scatters layout distances vs live Mapbox `depart_at` times: raw graph shortest-path
 times run ~20% fast from missing intersection/signal penalties, uniformly across
 hours -- NOT a rush-hour effect, so the modest rush swell is faithful.) Diagnostic: `HIGHLIGHT_STRETCH=8 .venv/bin/python scripts/render_base.py …`
