@@ -163,7 +163,10 @@ structure). NB: the local springs need the `tt>1s` floor in solve_hour -- a
 springs. The committed clean Manhattan (`data/day_mds_manhattan_sampled.json`,
 near-spike-free, same gross shape as the canonical) is:
 `scripts/solve_sampled.py data/day_mds_manhattan_dir.json data/day_mds_manhattan_sampled.json --graphlocal --wq 1 --ew 100 --hops 2`
-then render `_manhattan_sampled` + compose. Diagnostic: `HIGHLIGHT_STRETCH=8 .venv/bin/python scripts/render_base.py …`
+then render `_manhattan_sampled` + compose at `time_scale 1.2`. (`scripts/validate_warp.py`
+scatters layout distances vs live Mapbox `depart_at` times: raw graph shortest-path
+times run ~20% fast from missing intersection/signal penalties, uniformly across
+hours -- NOT a rush-hour effect, so the modest rush swell is faithful.) Diagnostic: `HIGHLIGHT_STRETCH=8 .venv/bin/python scripts/render_base.py …`
 colors edges stretched >8× their real length red.
 
 Takeaways: spikes are a *weighting* effect (a mild 1/D taper minimizes them);
