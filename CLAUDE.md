@@ -18,164 +18,140 @@ compose_video.py auto-detects).
 
 Always run scripts with `.venv/bin/python` from the repo root.
 
-## Reproduce the videos (fast path, no data downloads)
+## THE CANONICAL PIPELINE — use this for every new city
 
-Solved 24-hour layouts are committed as `data/day_mds*.json`. Each video is
-two steps: an expensive frame render (~10–30 min, cached to `data/frames<suffix>/`)
-and a fast overlay+encode (~30 s, output `shots/breathing<suffix>.mp4`).
+This is the current best path and the **only** one to use for new animations.
+Data source is **Mapbox Directions + Map Matching** (no Uber, no live-traffic
+tiles, no anchor-grid — those are all legacy, see "Legacy paths" below and never
+mix them in). Outputs are named `data/day_mds_<city>_gold.json` and
+`shots/breathing_<city>_gold.mp4`. Needs a Mapbox token in `.mapbox_token`
+(gitignored); free tier is 100 k requests/month and one city is ~5–40 k calls.
 
-```bash
-# render_base.py  <day_json>  <suffix>  [zoom]
-# compose_video.py <suffix> <title> <time_scale>
-```
-
-| city | render_base | compose_video |
-|---|---|---|
-| Manhattan | `data/day_mds.json` `""` | `""` `Manhattan` `1.37` |
-| Manhattan (planar) | `data/day_mds_planar.json` `_planar` | `_planar` `Manhattan` `1.37` |
-| Manhattan (amplified)* | `data/day_mds_amp.json` `_amp` | `_amp` `Manhattan` `1.77` |
-| Seattle | `data/day_mds_seattle.json` `_seattle` `1.2` | `_seattle` `Seattle` `1.52` |
-| Seattle (amplified)* | `data/day_mds_seattle_amp.json` `_seattle_amp` `1.2` | `_seattle_amp` `Seattle` `1.62` |
-| Los Angeles** | `data/day_mds_la.json` `_la` | `_la` `"Los Angeles"` `1.0` |
-| Seattle (directions)† | `COLOR_MODE=abs` `data/day_mds_seattle_dir.json` `_seattle_dir` | `_seattle_dir` `Seattle` `1.0` |
-
-Example (Manhattan amplified, the flagship):
+Six steps. Steps 1–4 are the slow API harvest (resumable — safe to re-run);
+5 is the gold solver; 6 is render+compose.
 
 ```bash
-.venv/bin/python scripts/render_base.py data/day_mds_amp.json _amp
-.venv/bin/python scripts/compose_video.py _amp Manhattan 1.77
-open shots/breathing_amp.mp4
+CITY=portland                                  # must exist in data/cities.json
+GRAPH=data/${CITY}_full.graphml
+
+# 1. street graph (arterial+: motorway..tertiary, osmnx free-flow speeds attached)
+.venv/bin/python scripts/fetch_city_graph.py $CITY            # -> $GRAPH
+
+# 2. arterial per-segment speeds, 24 h typical-traffic (Directions annotations)
+.venv/bin/python scripts/collect_directions.py $CITY $GRAPH   # -> data/${CITY}_dir_links.json
+
+# 3. residential per-segment speeds (Map Matching covers streets Directions skips)
+.venv/bin/python scripts/collect_matching.py $CITY $GRAPH     # -> data/${CITY}_match_links.json
+
+# 4. DATA-PREP: map links onto edges, impute gaps, class-calibrate free-flow
+#    (auto-merges _dir_links + _match_links). Writes the per-edge speed layout.
+.venv/bin/python scripts/solve_directions.py $CITY $GRAPH     # -> data/day_mds_${CITY}_dir.json
+
+# 5. GOLD SOLVER: importance-sampled all-pairs MDS, anchor 2.5 + shape 0.1 (THE solver)
+.venv/bin/python scripts/solve_sampled.py \
+    data/day_mds_${CITY}_dir.json data/day_mds_${CITY}_gold.json --anchor 2.5 --shape 0.1
+
+# 6. render frames (~10–30 min, cached to data/frames_<city>_gold/) then compose
+.venv/bin/python scripts/render_base.py data/day_mds_${CITY}_gold.json _${CITY}_gold
+.venv/bin/python scripts/compose_video.py _${CITY}_gold "Portland" 1.2
+open shots/breathing_${CITY}_gold.mp4
 ```
 
-\* "amplified" = hour-dependent calibration so rush hour swells to match
-real-world (Google-validated) congestion; these are the best-looking versions.
-\*\* LA's layout json is large and gitignored; regenerate it first (~2 min,
-no API token needed — the raw API pull is committed):
-`.venv/bin/python scripts/anchor_layout.py` (or `anchor_layout_full.py` for
-the per-intersection solve, ~1–2 h). LA's graph must exist too — see below.
+`scripts/overnight_gold.sh` / `overnight_harvest.sh` run this loop over many
+cities unattended (resilient + resumable) — copy their structure for batches.
 
-† "directions" = continuous per-segment speeds harvested from the Mapbox
-Directions API (much denser edge coverage than the live-traffic tile sampler).
-See "Directions-API speeds" below. Render with `COLOR_MODE=abs`; the layout
-json is committed but the raw `*_dir_links.json` harvest is gitignored.
+### Why each step is what it is (don't regress these)
 
-The `time_scale` numbers divide the 10-minute yardstick: raw graph times run
-fast vs. reality (no intersection penalties), validated against OSRM/Google.
-1.0 for LA because Mapbox typical-traffic times are already calibrated.
+- **Data source = Directions + Map Matching, nothing else.** The goal is to
+  cover cities Uber never mapped, so every speed must be Mapbox-derived. The two
+  APIs are complementary: Directions only ever returns the *fastest* path (rides
+  arterials, ~40% edge coverage alone); Map Matching snaps *chosen* traces onto
+  the network, filling the residential streets Directions skips (lifts coverage
+  to ~80%+). The retired tile sampler left ~60% of edges at a constant free-flow
+  speed, so those cities barely congested — the symptom that motivated this path.
+  All harvests use `depart_at` TYPICAL traffic for an upcoming weekday (a
+  prediction, queryable now — no live polling), matching Uber's weekday-average.
+- **Imputation (`solve_directions.py`).** Uncovered edge-hours are filled by IDW
+  of the *congestion ratio* (speed/free-flow) of the 8 nearest covered edges,
+  not raw speed — so a side street inherits its neighborhood's rush-hour shape.
+  Uncovered-edge **free-flow** is set to the observed per-highway-class median
+  (≥8 covered edges to calibrate), because posted speed limits overestimate real
+  residential free-flow by ~70%; classes never observed fall back to osmnx
+  speed_kph. Coverage % prints at solve time.
+- **Gold solver = `solve_sampled.py --anchor 2.5 --shape 0.1`.** Importance-sampled
+  (Horvitz–Thompson) all-pairs MDS: a spring between sampled node pairs, rest
+  length = c·travel-time. Defaults `--graphlocal --wq 1 --ew 100 --hops 2` build
+  a 2-hop street mesh for the local band + distance-sampled long pairs for gross
+  structure — this is what killed the old "furry"/spiky-edge artifact (street
+  edges are now constrained, unlike the legacy landmark solver). `--anchor 2.5`
+  is a *small* similarity-invariant Procrustes pull toward the geographic shape
+  (the chosen gold value): just enough to stabilize gauge without flattening the
+  warp. The anchor scale is normalized by spring energy, so it is NOT comparable
+  to solve_directions' old 0.05 — on this solver 0 = fully warped, ~30 = mild,
+  ~200 = "looks like the normal geographic map". `--shape 0.1` is the
+  as-similar-as-possible (ASAP) angle term: it penalizes each junction's street
+  fan deviating from a rotation+scale of its geographic shape, killing the
+  street-to-street *jitter* (incoherent local shear) while leaving local scale
+  free so the breathing survives. Chicago sweep: jitter (Laplacian roughness)
+  falls 0.685→0.52 and plateaus by ~0.1, breath stays ~62% of the no-shape 64%;
+  ≥2 flattens the swell, ≤0.01 under-smooths. NB the jitter is the LOCAL mesh
+  fitting a non-Euclidean metric, not the far field — weakening far springs
+  (`--fw`) does nothing, and capping `--maxiter` under-converges the ASAP term
+  (it relaxes slowly); to sweep it fast, `--init <prior_layout> --passes 1`
+  warm-starts + run cities in parallel (quality-neutral; maxiter-capping is not).
+- **Render straightens loop roads (`render_base.py`).** Each edge is drawn as
+  its real street polyline, rotated+scaled so its endpoints land on the solved
+  nodes (factor `(b-a)/d0`). Streets that loop back near their start have a tiny
+  geographic chord `d0`, so that scale explodes and the curve "spools out" into a
+  giant arc. The fix: any edge with sinuosity (arc/chord) > `SINU_MAX` (env,
+  default 5) is drawn as a straight chord instead. Only ~0.1% of edges (real
+  ramps/cul-de-sacs) are affected.
+- **`time_scale 1.2` in compose.** Graph shortest-path times run ~20% fast vs
+  reality (no intersection/signal penalties) — uniformly across hours, NOT a
+  rush effect, so the swell stays faithful. `scripts/validate_warp.py` scatters
+  layout distance vs live Mapbox `depart_at` times to confirm/recalibrate per
+  city (it found api/map ≈ 1.18 → 1.2). Coloring: default `ratio` mode (speed vs
+  each edge's daily max) is the gold look — do not pass `COLOR_MODE=abs` for new
+  cities (that was a workaround for sparse categorical tile data).
 
-## Re-solve the layouts from scratch (full path)
+### Adding a city not in cities.json
 
-Needs the 2019 Uber Movement speed data (~120 MB) and OSM graphs:
+Append `{"name": ..., "tz": ..., "bbox": [w, s, e, n]}` to `data/cities.json`
+(bbox = lon/lat of the metro window you want framed), then run from step 1.
 
-```bash
-sh scripts/fetch_data.sh                                   # speed matrices
-.venv/bin/python scripts/fetch_graph.py                    # Manhattan graph
-.venv/bin/python scripts/fetch_graph.py "Seattle, Washington, USA" seattle.graphml
-```
+### Solver tuning knobs (rarely needed; gold defaults are right)
 
-Then per city (Manhattan shown; Seattle adds `--graph data/seattle.graphml
---data-dir data/seattle --out data/day_mds_seattle.json`):
+`solve_sampled.py`: `--wq` stress taper (0 = 1/D² local/fewest-spikes, 1 = 1/D
+Sammon sweet spot **default**, 2 = unweighted/global/spiky); `--ew` street-spring
+over-weight (default 100); `--hops` local-mesh radius (default 2; denser = cleaner
+fine structure); `--anchor` geographic pull (gold 2.5); `--lcut` local/sampled
+cutoff; `--seed`. NB the `tt>1s` floor in `solve_hour` is load-bearing — a `>30s`
+floor silently drops ~2/3 of short street springs. Diagnostic:
+`HIGHLIGHT_STRETCH=8 .venv/bin/python scripts/render_base.py …` paints edges
+stretched >8× their real length red. Takeaways: spikes are a *weighting* effect
+(mild 1/D taper minimizes them); folds are inherent to flattening a non-Euclidean
+metric into 2D; `--planar` removes folds but freezes the breathing (planar XOR
+breathing).
 
-```bash
-.venv/bin/python scripts/animate_mds.py                    # 24 MDS solves, ~20–60 min
-.venv/bin/python scripts/calibrate_yard.py data/day_mds.json data/manhattan.graphml data
-.venv/bin/python scripts/amplify_breathing.py data/day_mds.json data/day_mds_amp.json 1.77 2.37
-# Seattle amplify anchors: 1.62 2.26
-```
+## Legacy paths (do NOT use for new cities — kept only to reproduce old videos)
 
-`--planar` on animate_mds.py adds a foldover barrier (much slower: ~1 h
-Manhattan, ~12 h Seattle — generally not worth it).
+These predate the canonical pipeline and use retired data sources. Listed so you
+recognize old artifacts; never build a new animation with them.
 
-## Any other city (no Uber data needed)
-
-`scripts/anchor_pull.py` samples 24 h of typical-traffic drive times from the
-Mapbox Directions API over a sparse anchor grid (freeway-chained; ~30 k
-requests ≈ a city, free tier is 100 k/month). Needs a Mapbox token in
-`.mapbox_token` (gitignored). Then `anchor_layout_full.py` solves every
-intersection using corridors as the speed sensor, and the render pipeline
-runs unchanged with `time_scale 1.0`. The LA graph used by the committed pull:
-
-```python
-ox.graph_from_bbox(bbox=(-118.66, 33.70, -118.10, 34.32), network_type="drive",
-    custom_filter='["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link"]')
-# -> save as data/la_full.graphml, then add_edge_speeds
-```
-
-## Directions-API speeds — denser coverage, any city (the `_dir` variants)
-
-A newer Mapbox path than anchor_pull, used for the `_dir` videos. Instead of
-point-to-point anchor times, it harvests the *per-segment* speed annotations
-the Directions API returns along each route — ~150–250 located (lon, lat, dist,
-dur) samples per call — giving far denser edge coverage than the live-traffic
-tiles. Needs `.mapbox_token`. Two steps, then the normal render:
-
-```bash
-# 1. harvest typical-traffic per-segment speeds, 24 h (resumable; ~routes×24 calls)
-.venv/bin/python scripts/collect_directions.py seattle data/seattle_full.graphml
-# 2. map onto edges, impute gaps, 24 MDS solves -> data/day_mds_seattle_dir.json
-.venv/bin/python scripts/solve_directions.py seattle data/seattle_full.graphml
-# 3. render (abs coloring) + compose (time_scale 1.0, like LA's calibrated times)
-COLOR_MODE=abs .venv/bin/python scripts/render_base.py data/day_mds_seattle_dir.json _seattle_dir
-.venv/bin/python scripts/compose_video.py _seattle_dir Seattle 1.0
-```
-
-`solve_directions.py` prints edge coverage % (well above the tile approach).
-Run it on `data/manhattan.graphml` for a directions-based Manhattan directly
-comparable to the original Uber map — same network, different speed source.
-
-### Map Matching for residential coverage
-
-Directions always returns the *fastest* path, so it rides arterials and skips
-residential streets (Manhattan: 39% edge coverage). `collect_matching.py` fills
-them via the Mapbox **Map Matching** API: it walks the street graph into long
-traces (≤100 coords) and reads back per-segment typical-traffic speeds for
-*those* exact streets. `solve_directions.py` auto-merges `<city>_match_links.json`
-with `<city>_dir_links.json`, lifting Manhattan to 83% real coverage (> the old
-Uber 67%). It also calibrates uncovered-edge free-flow from the observed per-class
-median (posted limits overestimate residential free-flow ~70%).
-
-```bash
-# after collect_directions: add residential coverage, then solve + render as usual
-.venv/bin/python scripts/collect_matching.py manhattan data/manhattan.graphml
-.venv/bin/python scripts/solve_directions.py manhattan data/manhattan.graphml
-.venv/bin/python scripts/render_base.py data/day_mds_manhattan_dir.json _manhattan_dir
-.venv/bin/python scripts/compose_video.py _manhattan_dir Manhattan 1.0
-```
-
-### Solver knobs / research (`solve_directions.py`, `solve_sampled.py`)
-
-The layout is a spring model: springs from landmarks to nodes, rest length =
-travel-time distance (edges are NOT in the objective). Knobs on solve_directions:
-- `--wq Q` — stress weighting: 0 = 1/D² (local; fewest spikes, more folds),
-  1 = 1/D (Sammon, the sweet spot), 2 = unweighted (global; spiky).
-- `--landmarks N` — more landmarks lower spike *severity*, not the regime.
-- `--planar [--tau T --wtri W]` — triangle foldover barrier → planar, but it
-  freezes the breathing (the breathing *is* the fold-prone curl). planar XOR breathing.
-- `--wedge W` — add a strong spring on every street edge (local smoothing).
-- `--seed S` — landmark RNG (spikes are seed-dependent → emergent, not intrinsic).
-
-`solve_sampled.py` = importance-sampled (Horvitz–Thompson) all-pairs MDS — keep
-pairs w.p. ∝1/dist, weight 1/p; `--graphlocal` uses the street graph for the
-local band + sampled long pairs for gross structure, `--ew` over-weights street
-springs, `--hops H` makes the local stratum an H-hop mesh (denser = cleaner fine
-structure). NB: the local springs need the `tt>1s` floor in solve_hour -- a
-`>30s` floor (harmless for landmark pairs) silently drops ~2/3 of short street
-springs. The committed clean Manhattan (`data/day_mds_manhattan_sampled.json`,
-near-spike-free, same gross shape as the canonical) is:
-`scripts/solve_sampled.py data/day_mds_manhattan_dir.json data/day_mds_manhattan_sampled.json`
-(graphlocal/wq1/ew100/hops2 are now the **defaults**, so no flags needed; add
-`--anchor 200` for a geographic "normal Manhattan" look). **solve_sampled is the
-default layout solver** — solve_directions is now just data-prep (harvest +
-speed calibration) + the legacy landmark solve it reads speeds from.
-Then render `_manhattan_sampled` + compose at `time_scale 1.2`. (`scripts/validate_warp.py`
-scatters layout distances vs live Mapbox `depart_at` times: raw graph shortest-path
-times run ~20% fast from missing intersection/signal penalties, uniformly across
-hours -- NOT a rush-hour effect, so the modest rush swell is faithful.) Diagnostic: `HIGHLIGHT_STRETCH=8 .venv/bin/python scripts/render_base.py …`
-colors edges stretched >8× their real length red.
-
-Takeaways: spikes are a *weighting* effect (a mild 1/D taper minimizes them);
-folds are inherent to flattening a non-Euclidean metric into 2D; the canonical
-`1/D²` landmark stays the flagship for its symmetric rush-hour swell.
+- **Uber Movement** (`animate_mds.py`, `calibrate_yard.py`, `amplify_breathing.py`,
+  `fetch_data.sh`, `fetch_graph.py`) — 2019 Uber speed matrices; produced the
+  original `data/day_mds.json` / `_amp` / `_seattle` / `_planar` flagships
+  (`time_scale` 1.37–1.77). Coverage decays as OSM way-ids drift.
+- **Live-traffic tiles** (`solve_tiles.py`, `data/day_mds_{boston,chicago,nyc,sf}.json`,
+  mode `day-mds-tiles`) — sparse edge coverage (~40%), weak congestion signal.
+  Superseded; re-harvest these cities via the canonical pipeline.
+- **Anchor grid** (`anchor_pull.py`, `anchor_layout.py`, `anchor_layout_full.py`,
+  `data/day_mds_la*.json`, mode `day-mds-anchor`) — point-to-point typical-traffic
+  over a sparse grid; LA's original source. Superseded by Directions+Matching.
+- **Landmark solver** = `solve_directions.py`'s *own* MDS output. In the canonical
+  pipeline solve_directions is used ONLY as data-prep (step 4); its landmark
+  layout (springs from a few landmarks, edges absent from the objective → furry)
+  is the legacy solver that `solve_sampled.py` replaced.
 
 ## Gotchas
 
@@ -188,8 +164,13 @@ folds are inherent to flattening a non-Euclidean metric into 2D; the canonical
 - validate_times*.py expect to run from `scripts/` (they use `../data` paths).
 - The viewer (`viewer/day.html?data=...`) needs `python3 -m http.server` from
   the repo root; it splines the same jsons interactively.
-- Solves print per-hour `stress/pair` and `breath %` — breathing should span
-  roughly −15%…+20% (raw Uber cities), −40%…+40% (LA typical-traffic).
-- Speed-matrix joins key on OSM way ids carried in the graphml — re-fetching
-  a graph years later may lose some matches as OSM evolves; coverage prints
-  at solve time (Manhattan ~67%, Seattle ~24% as committed).
+- Solves print per-hour `breath %` — for canonical Directions cities expect
+  roughly −15%…+20% (dense grids like Manhattan/Seattle) up to ≈ ±30% (sprawl
+  like LA). A city that barely breathes (~±2%) means poor edge coverage —
+  re-check the coverage % from step 4 before rendering.
+- `solve_directions.py` prints edge coverage % (covered vs imputed). Directions
+  alone is ~40%; with Map Matching merged it should reach ~80%+. Low coverage =
+  weak congestion signal (the retired tile cities sat at ~40% and looked dead).
+- `solve_sampled.py` runs an all-pairs Dijkstra ×24; memory ≈ n_nodes²×8 bytes
+  per hour (~3 GB at ~19 k nodes). For very large metros, run cities sequentially,
+  not concurrently.

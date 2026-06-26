@@ -46,6 +46,13 @@ eu = np.array([e["u"] for e in edges])
 ev = np.array([e["v"] for e in edges])
 zpts = [np.array(e["pts"]).reshape(-1, 2) @ np.array([1, 1j]) for e in edges]
 glen = np.array([abs(z[-1] - z[0]) for z in zpts])   # geographic end-to-end length
+# sinuosity = real arc length / end-to-end chord. Loop roads (ramps, cul-de-sacs
+# that return near their start) have a tiny chord, so the per-edge endpoint-pinning
+# scale (b-a)/d0 inflates their curve into a giant "spool". Draw any edge above
+# SINU_MAX as a straight a->b line instead of its real polyline.
+garc = np.array([np.abs(np.diff(z)).sum() if len(z) > 1 else 0.0 for z in zpts])
+sinu = garc / np.maximum(glen, 1e-9)
+SINU_MAX = float(os.environ.get("SINU_MAX", 5))
 sp = np.array([e["sp"] for e in edges])
 obs = np.array([e["obs"] for e in edges])
 eref = sp.max(axis=1)
@@ -110,7 +117,9 @@ for s in range(STEPS):
     for i in range(len(edges)):
         z0 = zpts[i]
         d0 = z0[-1] - z0[0]
-        if abs(d0) > 1e-9:
+        if sinu[i] > SINU_MAX:
+            z1 = np.array([a[i], b[i]])             # loop road -> straight chord
+        elif abs(d0) > 1e-9:
             z1 = a[i] + (b[i] - a[i]) / d0 * (z0 - z0[0])
         else:
             z1 = z0 + (a[i] - z0[0])

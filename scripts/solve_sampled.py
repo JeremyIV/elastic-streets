@@ -49,6 +49,38 @@ ap.add_argument("--hops", type=int, default=2,
 ap.add_argument("--anchor", type=float, default=0.0,
                 help="similarity-invariant Procrustes pull toward geographic shape "
                      "(0=off; higher = more 'looks like normal Manhattan')")
+ap.add_argument("--corr", action=argparse.BooleanOptionalAction, default=True,
+                help="correlated far-pair sampling: each node gets one shared "
+                     "latent value, nearby nodes reuse it so they pick the SAME "
+                     "far 'hub' partners -> aligned far-field, less street-to-street "
+                     "jitter. Same per-distance marginals (HT weights unchanged). "
+                     "--no-corr = independent per-pair Bernoulli (old behavior)")
+ap.add_argument("--landmarks", type=int, default=0,
+                help="if >0, the far field is K shared landmarks (each sprung to "
+                     "EVERY node) instead of sampled pairs -- deterministic, "
+                     "spatially coherent far field (the landmark solver) combined "
+                     "with the local street mesh. Smooth far field + constrained "
+                     "short edges; overrides --corr/sampling. Try --wq 2 (1/D^2) "
+                     "to match the old _dir look.")
+ap.add_argument("--fw", type=float, default=1.0,
+                help="far-spring weight multiplier (long-distance springs only). "
+                     "<1 weakens the far field so the local street mesh dominates "
+                     "(smoother, less jaggy); local springs AND the anchor are held "
+                     "at their fw=1 strength, so this is a clean local-vs-far dial.")
+ap.add_argument("--shape", type=float, default=0.0,
+                help="as-similar-as-possible angle term: penalize each junction's "
+                     "street fan deviating from a rotation+scale of its geographic "
+                     "shape. Preserves local angles (kills street-to-street jitter) "
+                     "while leaving local scale free (breathing intact). 0=off; "
+                     "sweep up until breathing starts to flatten.")
+ap.add_argument("--init", default=None,
+                help="warm-start: seed each hour from this layout json's node_hours. "
+                     "Near-optimal init -> L-BFGS converges in far fewer iters for the "
+                     "SAME minimum. Ideal for sweeping a small param (e.g. --shape) off "
+                     "an existing solve; pair with --passes 1.")
+ap.add_argument("--passes", type=int, default=2,
+                help="solve passes over the 24 hours (2 from cold start; 1 is enough "
+                     "when warm-started via --init)")
 args = ap.parse_args()
 
 d = json.load(open(args.inp))
@@ -68,6 +100,18 @@ def plen(e):
 
 length = np.maximum(np.array([plen(e) for e in edges]), 1.0)
 print(f"{N} nodes, {len(edges)} edges", flush=True)
+
+# --- shape/angle (ASAP) precompute: real street edges, both directions. Skip
+# near-zero-chord loop edges (their direction is meaningless). E0 = geographic
+# edge vectors; SDEG = per-node incident count; used by the --shape term. ---
+_Z0 = P0[:, 0] + 1j * P0[:, 1]
+_e0 = _Z0[eb] - _Z0[ea]
+_sk = np.abs(_e0) > 1.0
+SU = np.concatenate([ea[_sk], eb[_sk]])
+SV = np.concatenate([eb[_sk], ea[_sk]])
+E0 = np.concatenate([_e0[_sk], -_e0[_sk]])
+E0N2 = np.maximum(E0.real * E0.real + E0.imag * E0.imag, 1e-12)
+SDEG = np.maximum(np.bincount(SU, minlength=N), 1)
 
 # ---- importance-sample pairs by geographic distance -------------------------
 rng = np.random.default_rng(args.seed)
@@ -95,29 +139,70 @@ if args.graphlocal:
     budget_far = max(args.budget - len(la), 1)
 else:
     budget_far = args.budget
-lo, hi = 0.0, float(geo.max())                          # binary-search k for the budget
-for _ in range(50):
-    k = 0.5 * (lo + hi)
-    if np.minimum(1.0, k / geo).sum() < budget_far:
-        lo = k
-    else:
-        hi = k
-k = 0.5 * (lo + hi)
-p = np.minimum(1.0, k / geo)
-keep = rng.random(len(geo)) < p
-if args.graphlocal:                                     # local stratum (p=1) + sampled far pairs
-    A0 = np.concatenate([la, I[keep]])
-    B0 = np.concatenate([lb, J[keep]])
-    WT = np.concatenate([args.ew * lg ** (-args.wq),
-                         (1.0 / p[keep]) * geo[keep] ** (-args.wq)])
-    print(f"springs: {len(la)} local (<={args.hops} hops) + {int(keep.sum())} sampled "
-          f"(geo>={args.lcut:.0f} m, k={k:.0f} m) = {len(A0)}", flush=True)
+if args.landmarks > 0:
+    # FAR FIELD = shared landmarks. K random nodes, each sprung to EVERY node.
+    # Every node references the SAME landmarks, so the far-field pull is spatially
+    # coherent -- no per-node sampling noise (independent -> jitter) and no shared-
+    # latent hubs (corr -> low-freq spikes). This is the classic landmark solver;
+    # the local street mesh below supplies the short-edge constraints the pure
+    # landmark solver lacked (those gaps were its spike source). --wq 2 -> 1/D^2.
+    Kl = min(args.landmarks, N)
+    lm = rng.choice(N, size=Kl, replace=False)
+    Af = np.repeat(lm, N)
+    Bf = np.tile(np.arange(N), Kl)
+    m = Af != Bf
+    Af, Bf = Af[m], Bf[m]
+    gf = np.maximum(np.hypot(P0[Af, 0] - P0[Bf, 0], P0[Af, 1] - P0[Bf, 1]), 1e-9)
+    WTf = gf ** (-args.wq)
+    print(f"landmarks: {Kl} x {N} = {len(Af)} far springs", flush=True)
 else:
-    A0, B0 = I[keep], J[keep]
-    WT = (1.0 / p[keep]) * geo[keep] ** (-args.wq)
-    print(f"sampled {len(A0)} springs (k={k:.0f} m)", flush=True)
+    lo, hi = 0.0, float(geo.max())                      # binary-search k for the budget
+    for _ in range(50):
+        k = 0.5 * (lo + hi)
+        if np.minimum(1.0, k / geo).sum() < budget_far:
+            lo = k
+        else:
+            hi = k
+    k = 0.5 * (lo + hi)
+    p = np.minimum(1.0, k / geo)
+    if args.corr:
+        # Correlated sampling (variance reduction): give every node one shared latent
+        # value v ~ U(0,1) and keep a pair iff v_i + v_j < t(p), the p-quantile of the
+        # sum of two uniforms (triangular on [0,2]; closed form below). Per-pair this is
+        # still P[keep] = p exactly, so the HT weights 1/p and the per-distance density
+        # are unchanged -- but because each node reuses its v across all its springs,
+        # low-v nodes act as shared "hubs" everyone springs to, so neighboring nodes
+        # pick the same far partners. Their far-field pulls align -> the random
+        # street-to-street jitter of independent sampling goes away.
+        vnode = rng.random(N)
+        t = np.where(p <= 0.5, np.sqrt(2.0 * p),
+                     2.0 - np.sqrt(2.0 * np.maximum(1.0 - p, 0.0)))
+        keep = (vnode[I] + vnode[J]) < t
+    else:
+        keep = rng.random(len(geo)) < p
+    Af, Bf = I[keep], J[keep]
+    WTf = (1.0 / p[keep]) * geo[keep] ** (-args.wq)
+    print(f"sampled {int(keep.sum())} far springs (k={k:.0f} m)", flush=True)
+if args.graphlocal:                                     # local mesh + far springs
+    A0 = np.concatenate([la, Af])
+    B0 = np.concatenate([lb, Bf])
+    WT = np.concatenate([args.ew * lg ** (-args.wq), WTf])
+    print(f"  + {len(la)} local (<={args.hops} hops) = {len(A0)} springs", flush=True)
+else:
+    A0, B0, WT = Af, Bf, WTf
 WT = WT / WT.mean()                                     # mean-1 (numerics)
-del I, J, geo, p, keep
+# split local vs far so --fw re-weights ONLY the far springs. WTG keeps the gold
+# (fw=1) weights; the anchor is normalized from WTG, so weakening the far field
+# moves neither the local mesh nor the anchor -- a clean local-vs-far dial.
+n_local = len(la) if args.graphlocal else 0
+is_far = np.zeros(len(WT), dtype=bool)
+is_far[n_local:] = True
+WTG = WT.copy()
+if args.fw != 1.0:
+    WT = WT.copy()
+    WT[is_far] *= args.fw
+    print(f"far-spring weight x{args.fw} (local mesh + anchor held at fw=1)", flush=True)
+del I, J, geo
 
 # ---- per-hour all-pairs travel times for the sampled pairs -------------------
 TT = np.zeros((24, len(A0)))
@@ -146,6 +231,7 @@ print(f"global scale {c:.2f} m/s ({c*3.6:.0f} kph)", flush=True)
 def solve_hour(Th, X0):
     ok = np.isfinite(Th) & (Th > 1)
     A, B, D, W = A0[ok], B0[ok], c * Th[ok], WT[ok]
+    Wg = WTG[ok]                                          # gold weights for the anchor
 
     def f(x):
         P = x.reshape(N, 2)
@@ -158,13 +244,32 @@ def solve_hour(Th, X0):
             grad[:, col] += np.bincount(A, g[:, col], minlength=N)
             grad[:, col] -= np.bincount(B, g[:, col], minlength=N)
         E_ = float((W * diff * diff).sum())
+        if args.anchor > 0.0 or args.shape > 0.0:
+            Wd2 = float((Wg * D * D).sum())          # distance-energy scale (shared)
         if args.anchor > 0:                          # Procrustes pull to geographic
             tmean = P.mean(0); Pc = P - tmean
-            s = (Pc * P0).sum() / P0_ss
-            dxy = Pc - s * P0
-            wa = args.anchor * float((W * D * D).sum()) / (N * span2)
+            sa = (Pc * P0).sum() / P0_ss
+            dxy = Pc - sa * P0
+            wa = args.anchor * Wd2 / (N * span2)
             E_ += wa * float((dxy * dxy).sum())
             grad += 2.0 * wa * dxy
+        if args.shape > 0:                           # ASAP: each junction's street fan
+            # should be a rotation+scale of its geographic fan (angles preserved,
+            # local scale free). svec = per-node envelope-optimal similarity (mean of
+            # per-edge complex ratios e/e0), so we differentiate holding it fixed.
+            Zc = P[:, 0] + 1j * P[:, 1]
+            e = Zc[SV] - Zc[SU]
+            ratio = e / E0
+            svec = (np.bincount(SU, ratio.real, minlength=N)
+                    + 1j * np.bincount(SU, ratio.imag, minlength=N)) / SDEG
+            r = e - svec[SU] * E0                     # residual after best local similarity
+            we = (args.shape * Wd2 / max(len(SU), 1)) / E0N2
+            E_ += float((we * (r.real * r.real + r.imag * r.imag)).sum())
+            gr = 2.0 * we * r
+            grad[:, 0] += (np.bincount(SV, gr.real, minlength=N)
+                           - np.bincount(SU, gr.real, minlength=N))
+            grad[:, 1] += (np.bincount(SV, gr.imag, minlength=N)
+                           - np.bincount(SU, gr.imag, minlength=N))
         return E_, grad.ravel()
 
     res = minimize(f, X0.ravel().copy(), jac=True, method="L-BFGS-B",
@@ -181,14 +286,19 @@ def align(X):
     return Xc @ (Uu @ Vt) + P0.mean(0)
 
 
+INIT = None
+if args.init:
+    INIT = [np.array(x).reshape(N, 2) for x in json.load(open(args.init))["node_hours"]]
+    print(f"warm-start from {args.init}", flush=True)
 X = P0.copy()
 r0 = np.sqrt((P0 ** 2).sum(1)).mean()
 t0 = time.time()
 hours = []
-for pas in range(2):
+for pas in range(args.passes):
     out = []
     for h in range(24):
-        X = solve_hour(TT[h], X)
+        X0 = INIT[h] if (INIT is not None and pas == 0) else X
+        X = solve_hour(TT[h], X0)
         Xa = align(X)
         out.append(Xa)
         mr = np.sqrt(((Xa - Xa.mean(0)) ** 2).sum(1)).mean()

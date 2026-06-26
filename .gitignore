@@ -14,3 +14,8 @@ data/day_mds_la_full.json
 # raw per-segment speed harvests (large; re-fetch via collect_directions.py / collect_matching.py)
 data/*_dir_links.json
 data/*_match_links.json
+
+# --- safety-pass managed ignores ---
+.DS_Store
+data/
+shots/
